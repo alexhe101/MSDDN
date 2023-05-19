@@ -5,7 +5,28 @@ import numpy as np
 from .modules import InvertibleConv1x1
 from .refine import Refine
 import torch.nn.init as init
+class HinResBlock(nn.Module):
+    def __init__(self, in_size, out_size, relu_slope=0.2, use_HIN=True):
+        super(HinResBlock, self).__init__()
+        self.identity = nn.Conv2d(in_size, out_size, 1, 1, 0)
 
+        self.conv_1 = nn.Conv2d(in_size, out_size, kernel_size=3, padding=1, bias=True)
+        self.relu_1 = nn.LeakyReLU(relu_slope, inplace=False)
+        self.conv_2 = nn.Conv2d(out_size, out_size, kernel_size=3, padding=1, bias=True)
+        self.relu_2 = nn.LeakyReLU(relu_slope, inplace=False)
+        self.conv_3 = nn.Conv2d(in_size+in_size,out_size,3,1,1)
+        if use_HIN:
+            self.norm = nn.InstanceNorm2d(out_size // 2, affine=True)
+        self.use_HIN = use_HIN
+
+    def forward(self, x):
+        resi = self.relu_1(self.conv_1(x))
+        out_1, out_2 = torch.chunk(resi, 2, dim=1)
+        resi = torch.cat([self.norm(out_1), out_2], dim=1)
+        resi = self.relu_2(self.conv_2(resi))
+        # input = torch.cat([x,resi],dim=1)
+        # out = self.conv_3(input)
+        return x+resi
 def initialize_weights(net_l, scale=1):
     if not isinstance(net_l, list):
         net_l = [net_l]
@@ -83,15 +104,30 @@ class Net(nn.Module):
     def __init__(self, num_channels=4,channels=None,base_filter=None,args=None):
         super(Net, self).__init__()
         channels = base_filter
-        self.innblock = nn.Sequential(InvBlock(DenseBlock, 2*channels, channels),
+        self.fuse1 = nn.Sequential(InvBlock(HinResBlock, 2*channels, channels),
                                          nn.Conv2d(2*channels,channels,1,1,0))
-        self.conv_p = nn.Conv2d(4, channels, 3, 1, 1)  # conv for ms
-        self.conv_p1 = nn.Conv2d(1, channels, 3, 1, 1)  # conv for pan
-        self.conv_t = nn.Conv2d(channels, channels, 3, 1, 1)
+        self.fuse2 = nn.Sequential(InvBlock(HinResBlock, 2*channels, channels),
+                                         nn.Conv2d(2*channels,channels,1,1,0))
+        self.fuse3 = nn.Sequential(InvBlock(HinResBlock, 2*channels, channels),
+                                         nn.Conv2d(2*channels,channels,1,1,0))
+        self.fuse4 = nn.Sequential(nn.Conv2d(2*channels,channels,3,1,1),nn.ReLU(),nn.Conv2d(channels,channels,1,1,0))
+        self.fuse5 = nn.Sequential(nn.Conv2d(2*channels,channels,3,1,1),nn.ReLU(),nn.Conv2d(channels,channels,1,1,0))
+        self.fuse6 = nn.Sequential(nn.Conv2d(2*channels,channels,3,1,1),nn.ReLU(),nn.Conv2d(channels,channels,1,1,0))
+        self.msconv = nn.Conv2d(4,channels,3,1,1)# conv for ms
+        self.panconv = nn.Conv2d(1,channels,3,1,1)
+        self.conv0 = HinResBlock(channels,channels)
+        self.conv1 = HinResBlock(channels,channels)
+        self.conv2 = HinResBlock(channels,channels)
         self.conv_ada = nn.Conv2d(2*channels,channels,3,1,1)
-        self.fft = Freprocess(channels)
-        self.conv_out = nn.Conv2d(channels,4,3,1,1)
-        self.down = nn.Conv2d(channels,channels,3,2,1)
+        self.fft1 = Freprocess(channels)
+        self.fft2 = Freprocess(channels)
+        self.fft3 = Freprocess(channels)
+        self.conv_out = Refine(channels,4)
+        self.down_pan1 = nn.Conv2d(channels,channels,3,2,1)
+        self.down_spa1 = nn.Conv2d(channels,channels,3,2,1)
+        self.down_spa2 = nn.Conv2d(channels, channels, 3, 2, 1)
+        self.down_pan2 = nn.Conv2d(channels, channels, 3, 2, 1)
+        self.down_pan3 = nn.Conv2d(channels, channels, 3, 2, 1)
         # self.process = FeatureProcess(channels)
         # self.cdc = nn.Sequential(nn.Conv2d(1, 4, 1, 1, 0), cdcconv(4, 4), cdcconv(4, 4))
         # self.refine = Refine(channels, 4)
@@ -108,37 +144,35 @@ class Net(nn.Module):
         seq = []
         mHR = upsample(ms, M, N) # size 4
         ms = mHR
-        msf = self.conv_p(ms) #(4->channels) # size 4
-        # print(pan.shape)
-        # print(ms.shape)
-        panf = self.conv_p1(pan) #(1->channels)
+        msf = self.msconv(ms) #(4->channels) # size 4
+        panf = self.panconv(pan) #(1->channels)
         seq.append(panf) # for fft size 4
-        panf_2  =self.conv_t(panf) #(panf channels->channels)
+        panf_2  =self.conv1(panf) #(panf channels->channels)
         seq.append(panf_2) # for fft size 4
-        spa_fuse = self.innblock(torch.cat([msf, panf], 1)) # concat msf&panf to inn block (2*channels -> channels)
+        spa_fuse = self.fuse1(torch.cat([msf, panf], 1)) # concat msf&panf to inn block (2*channels -> channels)
 
         '''downsample spa_fuse and panf2'''
         M = M//2
         N = N//2
-        d_spa = self.down(spa_fuse)#downsample(spa_fuse,M,N) # size 2
-        d_panf = self.down(panf_2) #downsample(panf_2,M,N) # size 2
-        spa_fuse = self.innblock(torch.cat([d_spa, d_panf], 1)) # downsampled features into inn block (2*channels-> channels)
+        d_spa = self.down_spa1(spa_fuse)#downsample(spa_fuse,M,N) # size 2
+        d_panf = self.down_pan1(panf_2) #downsample(panf_2,M,N) # size 2
+        spa_fuse = self.fuse2(torch.cat([d_spa, d_panf], 1)) # downsampled features into inn block (2*channels-> channels)
 
         ''' downsample spa_fuse and d_panf'''
         M = M//2
         N = N//2
-        d_spa = self.down(spa_fuse)
-        panf_3 = self.conv_t(d_panf) # size 2
+        d_spa = self.down_spa2(spa_fuse)
+        panf_3 = self.conv0(d_panf) # size 2
         seq.append(panf_3)
-        d_panf = self.down(panf_3)#downsample(panf_3, M, N)
-        spa_fuse = self.innblock(torch.cat([d_spa, d_panf], 1))
+        d_panf = self.down_pan2(panf_3)#downsample(panf_3, M, N)
+        spa_fuse = self.fuse3(torch.cat([d_spa, d_panf], 1))
 
         '''upsample and do fft'''
         M*=2
         N*=2
         spa_fuse = upsample(spa_fuse,M,N)
-        fft_out = self.fft(spa_fuse,seq[-1]) #(channels)
-        t = self.conv_ada(torch.cat([fft_out,spa_fuse],1)) #(2*channels -> channels)
+        fft_out = self.fft1(spa_fuse,seq[-1]) #(channels)
+        t = self.fuse4(torch.cat([fft_out,spa_fuse],1)) #(2*channels -> channels)
         t+=spa_fuse
 
 
@@ -146,13 +180,13 @@ class Net(nn.Module):
         M*=2
         N*=2
         spa_fuse = upsample(spa_fuse, M, N)
-        fft_out = self.fft(spa_fuse,seq[-2])
-        t = self.conv_ada(torch.cat([fft_out,spa_fuse],1))
+        fft_out = self.fft2(spa_fuse,seq[-2])
+        t = self.fuse5(torch.cat([fft_out,spa_fuse],1))
         t += spa_fuse
 
         spa_fuse = t
-        fft_out = self.fft(spa_fuse, seq[-3])
-        t = self.conv_ada(torch.cat([fft_out, spa_fuse], 1))
+        fft_out = self.fft3(spa_fuse, seq[-3])
+        t = self.fuse6(torch.cat([fft_out, spa_fuse], 1))
         t= self.conv_out(t) #channels to 4
         HR = t+ms
         return HR
