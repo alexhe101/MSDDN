@@ -26,7 +26,7 @@ class Testsolver(BaseSolver):
         
         self.model = net(
             num_channels=self.cfg['data']['n_colors'], 
-            base_filter=64,  
+            base_filter=32,  
             args = self.cfg
         )
 
