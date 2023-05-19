@@ -32,7 +32,7 @@ class Solver(BaseSolver):
         assert (self.cfg['data']['n_colors']==4)
         self.model = net(
             num_channels=self.cfg['data']['n_colors'], 
-            base_filter=64,  
+            base_filter=32,  
             args = self.cfg
         )
         self.optimizer = maek_optimizer(self.cfg['schedule']['optimizer'], cfg, self.model.parameters())
