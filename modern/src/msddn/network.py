@@ -51,8 +51,9 @@ class Net(nn.Module):
         spatial = self.fuse1(torch.cat([msf, pan_full], 1))
 
         half_h, half_w = h // 2, w // 2
+        spatial_down = self.down_spa1(spatial)
         pan_half = self.down_pan1(pan_full_guidance)
-        spatial = self.fuse2(torch.cat([self.down_spa1(spatial), pan_half], 1))
+        spatial = self.fuse2(torch.cat([spatial_down, pan_half], 1))
         # Preserve evaluation order: spatial downsample precedes PAN conv0.
         spatial_down = self.down_spa2(spatial)
         pan_half_guidance = self.conv0(pan_half)
